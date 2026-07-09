@@ -1,0 +1,6 @@
+[
+  {"name":"java.lang.Object","allDeclaredMethods":true},
+  {"name":"org.jline.terminal.impl.NativePty","allDeclaredMethods":true},
+  {"name":"org.jline.terminal.impl.jni.JansiNativePty","allDeclaredMethods":true},
+  {"name":"org.jline.terminal.impl.jni.JnaNativePty","allDeclaredMethods":true}
+]

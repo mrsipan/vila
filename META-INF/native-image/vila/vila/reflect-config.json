@@ -1,0 +1,5 @@
+[
+  {"name":"dev.tamboui.backend.jline3.JLineBackendProvider","allDeclaredConstructors":true,"allDeclaredMethods":true,"allDeclaredFields":true},
+  {"name":"dev.tamboui.backend.jline3.JLineBackend","allDeclaredConstructors":true,"allDeclaredMethods":true,"allDeclaredFields":true},
+  {"name":"dev.tamboui.tui.bindings.DefaultBindings","allDeclaredMethods":true,"allDeclaredFields":true,"allDeclaredConstructors":true}
+]
