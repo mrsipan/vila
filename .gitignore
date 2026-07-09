@@ -1,0 +1,10 @@
+.scala-build/
+.scala-build/
+.bsp/
+META-INF/
+vila.jar
+vila
+svm_err_b_*
+*.class
+*.tasty
+*.log

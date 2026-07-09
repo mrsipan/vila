@@ -1,9 +1,0 @@
-{
-  "resources": [
-    {"pattern":".*\\.properties$"},
-    {"pattern":".*\\.txt$"},
-    {"pattern":".*bindings/.*"},
-    {"pattern":".*tamboui/.*"},
-    {"pattern":".*META-INF/services/.*"}
-  ]
-}
