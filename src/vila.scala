@@ -48,7 +48,8 @@ final case class TextBuffer(
     filename: Option[String] = None,
     modified: Boolean = false,
     cursor: CursorPos = CursorPos(0, 0),
-    undoStack: Vector[TextBuffer] = Vector.empty
+    undoStack: Vector[TextBuffer] = Vector.empty,
+    redoStack: Vector[TextBuffer] = Vector.empty
 ):
   def lineCount: Int = lines.length
   def currentLine: TextLine = lines(cursor.row)
@@ -96,7 +97,7 @@ final case class TextBuffer(
       lines = nl,
       modified = true,
       cursor = CursorPos(row, col + 1),
-      undoStack = undoStack :+ this
+      undoStack = undoStack :+ this, redoStack = Vector.empty
     )
 
   def insertString(s: String): TextBuffer =
@@ -108,7 +109,7 @@ final case class TextBuffer(
         lines = lines.updated(row, currentLine.delete(col - 1)),
         modified = true,
         cursor = CursorPos(row, col - 1),
-        undoStack = undoStack :+ this
+        undoStack = undoStack :+ this, redoStack = Vector.empty
       )
     else if row > 0 then
       val prevLen = lines(row - 1).length
@@ -120,20 +121,22 @@ final case class TextBuffer(
         ),
         modified = true,
         cursor = CursorPos(row - 1, prevLen),
-        undoStack = undoStack :+ this
+        undoStack = undoStack :+ this, redoStack = Vector.empty
       )
-    else this
+    else
+      this
 
   def splitLine: TextBuffer =
-    val before = currentLine.text.substring(0, col)
-    val after = currentLine.text.substring(col)
+    val safeCol = col.min(currentLine.length)
+    val before = currentLine.text.substring(0, safeCol)
+    val after  = currentLine.text.substring(safeCol)
     val indent = before.takeWhile(_.isWhitespace)
     copy(
       lines =
         lines.patch(row, Seq(TextLine(before), TextLine(after)), 1),
       modified = true,
       cursor = CursorPos(row + 1, indent.length),
-      undoStack = undoStack :+ this
+      undoStack = undoStack :+ this, redoStack = Vector.empty
     )
 
   def deleteLine: TextBuffer =
@@ -142,7 +145,7 @@ final case class TextBuffer(
         lines = Vector(TextLine.empty),
         modified = true,
         cursor = CursorPos(0, 0),
-        undoStack = undoStack :+ this
+        undoStack = undoStack :+ this, redoStack = Vector.empty
       )
     else
       val nr = row.min(lines.length - 2)
@@ -150,7 +153,7 @@ final case class TextBuffer(
         lines = lines.patch(row, Seq.empty, 1),
         modified = true,
         cursor = CursorPos(nr, 0),
-        undoStack = undoStack :+ this
+        undoStack = undoStack :+ this, redoStack = Vector.empty
       )
 
   def yankLine: String = currentLine.text + "\n"
@@ -160,7 +163,7 @@ final case class TextBuffer(
       lines = lines.patch(row + 1, Seq(TextLine.empty), 0),
       modified = true,
       cursor = CursorPos(row + 1, 0),
-      undoStack = undoStack :+ this
+      undoStack = undoStack :+ this, redoStack = Vector.empty
     )
 
   def insertLineAbove: TextBuffer =
@@ -168,14 +171,14 @@ final case class TextBuffer(
       lines = lines.patch(row, Seq(TextLine.empty), 0),
       modified = true,
       cursor = CursorPos(row, 0),
-      undoStack = undoStack :+ this
+      undoStack = undoStack :+ this, redoStack = Vector.empty
     )
 
   def indentLine(r: Int, amount: Int = 2): TextBuffer =
     copy(
       lines = lines.updated(r, TextLine(" " * amount + lines(r).text)),
       modified = true,
-      undoStack = undoStack :+ this
+      undoStack = undoStack :+ this, redoStack = Vector.empty
     )
 
   def outdentLine(r: Int, amount: Int = 2): TextBuffer =
@@ -184,7 +187,7 @@ final case class TextBuffer(
       lines =
         lines.updated(r, TextLine(lines(r).text.substring(toRemove))),
       modified = true,
-      undoStack = undoStack :+ this
+      undoStack = undoStack :+ this, redoStack = Vector.empty
     )
 
   def toggleCaseAt: TextBuffer =
@@ -201,13 +204,23 @@ final case class TextBuffer(
         lines = lines.updated(row, nl),
         modified = true,
         cursor = CursorPos(row, col + 1),
-        undoStack = undoStack :+ this
+        undoStack = undoStack :+ this, redoStack = Vector.empty
       )
     else this
 
   def undo: TextBuffer =
     if undoStack.isEmpty then this
-    else undoStack.last.copy(undoStack = undoStack.last.undoStack)
+    else
+      val prev = undoStack.last
+      // prev is the state before this change. Push current state onto redo stack.
+      prev.copy(redoStack = redoStack :+ this)
+
+  def redo: TextBuffer =
+    if redoStack.isEmpty then this
+    else
+      val next = redoStack.last
+      // next is the state after this undo. Push current state onto undo stack.
+      next.copy(undoStack = undoStack :+ this)
 
   // ── Range operations ──
 
@@ -229,7 +242,7 @@ final case class TextBuffer(
           lines = lines.updated(r1, nl),
           modified = true,
           cursor = CursorPos(r1, c1),
-          undoStack = undoStack :+ this
+          undoStack = undoStack :+ this, redoStack = Vector.empty
         ),
         del
       )
@@ -246,7 +259,7 @@ final case class TextBuffer(
           lines = lines.patch(r1, Seq(merged), r2 - r1 + 1),
           modified = true,
           cursor = CursorPos(r1, c1),
-          undoStack = undoStack :+ this
+          undoStack = undoStack :+ this, redoStack = Vector.empty
         ),
         sb.toString
       )
@@ -476,6 +489,9 @@ final case class TextBuffer(
       l.substring(s, e)
     else ""
 
+  /** Serialize the buffer content to a string suitable for writing to a file. */
+  def serialize: String = lines.map(_.text).mkString("\n") + "\n"
+
 // ═══════════════════════════════════════════════════════════════════
 //  EditorState — immutable snapshot of the entire editor
 // ═══════════════════════════════════════════════════════════════════
@@ -554,6 +570,20 @@ object InputHandler:
     else if s.pendingTextObject then onTextObject(ke, s)
     else if s.waitingForFChar.isDefined then onFChar(ke, s)
     else if ke.code == KeyCode.CHAR then
+      // Some backends send Ctrl+V as character 'v' with Ctrl modifier set,
+      // rather than as the raw ASCII control character (22). Check here.
+      if ke.hasCtrl then
+        val buf2 = s.buffer
+        ke.character match
+          case 'd' | 4  => return (s.pageDown, true)
+          case 'u' | 21 => return (s.pageUp, true)
+          case 'v' | 22 => return (s.copy(mode = VisualBlock,
+            visualStart = Some(buf2.cursor),
+            message = "-- VISUAL BLOCK --"), true)
+          case 'w' | 23 => return (s.copy(message = "Ctrl-W"), true)
+          case 'r' | 18 => return (s.copy(buffer = buf2.redo,
+            message = "Redo"), true)
+          case _ => ()
       onNormalChar(ke.character.toChar, s)
     else onNormalSpecial(ke, s)
 
@@ -561,9 +591,10 @@ object InputHandler:
     val buf = s.buffer
 
     // two-key sequences
+    // Must return immediately — otherwise fall-through overwrites the result
     if s.lastKey == 'g' then
       val s2 = s.copy(lastKey = 0)
-      c match
+      return c match
         case 'g' => (s2.copy(buffer = buf.moveGg), true)
         case 'e' => (s2.copy(buffer = buf.wordBack.wordEnd), true)
         case 'E' => (s2.copy(buffer = buf.bigWordBack.bigWordEnd), true)
@@ -571,14 +602,17 @@ object InputHandler:
         case _   => onNormalChar(c, s2)
     else if s.lastKey == 'z' then
       val s2 = s.copy(lastKey = 0)
-      c match
-        case 'z' => (s2.centerCursor, true)
-        case 't' => (s2.copy(scrollTop = buf.row), true)
-        case 'b' =>
-          (
-            s2.copy(scrollTop = (buf.row - s2.termHeight + 3).max(0)),
-            true
-          )
+      return c match
+        case 'z' => (s2.centerCursor, true)                         // zz
+        case 't' => (s2.copy(scrollTop = buf.row), true)            // zt
+        case 'b' =>                                                  // zb
+          (s2.copy(scrollTop = (buf.row - s2.termHeight + 3).max(0)), true)
+        case _ => onNormalChar(c, s2)
+    else if s.lastKey == 'Z' then
+      val s2 = s.copy(lastKey = 0)
+      return c match
+        case 'Z' => (s2.copy(message = "Saved & quit"), true)      // ZZ
+        case 'Q' => (s2.copy(message = "Quit"), true)              // ZQ
         case _ => onNormalChar(c, s2)
 
     // counts
@@ -590,6 +624,22 @@ object InputHandler:
         else n),
         true
       )
+
+    // Ctrl+letter (ASCII control codes 1-26) — handle before the main match
+    // so they don't fall through to 'unknown key'
+    val ctrlCode = c.toInt
+    if ctrlCode >= 1 && ctrlCode <= 26 then
+      val buf2 = s.buffer
+      return ctrlCode match
+        case 4  => (s.pageDown, true)                                 // Ctrl-D
+        case 21 => (s.pageUp, true)                                   // Ctrl-U
+        case 22 =>                                                    // Ctrl-V (visual block)
+          (s.copy(mode = VisualBlock, visualStart = Some(buf2.cursor),
+            message = "-- VISUAL BLOCK --"), true)
+        case 18 =>                                                     // Ctrl-R (redo)
+          (s.copy(buffer = buf2.redo, message = "Redo"), true)
+        case 23 => (s.copy(message = "Ctrl-W"), true)                // Ctrl-W
+        case _  => (s, true)
 
     c match
       // Insert
@@ -708,7 +758,14 @@ object InputHandler:
           ),
           true
         )
-      case 'd' => (s.copy(lastKey = 'd', pendingCount = 1), true)
+      case 'd' =>
+        (
+          s.copy(
+            pendingOp = Some(PendingOp("d")),
+            mode = OperatorPending
+          ),
+          true
+        )
       case 'c' =>
         (
           s.copy(
@@ -745,39 +802,6 @@ object InputHandler:
         (s.copy(buffer = buf.toggleCaseAt, pendingCount = 1), true)
 
       // Linewise from lastKey
-      case _ if s.lastKey == 'd' && c == 'd' =>
-        val del = buf.yankLine
-        (
-          s.copy(
-            buffer = buf.deleteLine,
-            yankRegister = del,
-            dotRepeat = Some(DotRepeat("dd")),
-            lastKey = 0,
-            pendingCount = 1
-          ),
-          true
-        )
-      case _ if s.lastKey == 'c' && c == 'c' =>
-        val del = buf.yankLine
-        enterInsert(
-          s.copy(
-            buffer = buf.deleteLine,
-            yankRegister = del,
-            dotRepeat = Some(DotRepeat("cc")),
-            lastKey = 0,
-            pendingCount = 1
-          )
-        )
-      case _ if s.lastKey == 'y' && c == 'y' =>
-        (
-          s.copy(
-            yankRegister = buf.yankLine,
-            dotRepeat = Some(DotRepeat("yy")),
-            lastKey = 0,
-            pendingCount = 1
-          ),
-          true
-        )
 
       // Visual
       case 'v' =>
@@ -868,6 +892,7 @@ object InputHandler:
       // Prefix
       case 'g' => (s.copy(lastKey = 'g', pendingCount = 1), true)
       case 'z' => (s.copy(lastKey = 'z', pendingCount = 1), true)
+      case 'Z' => (s.copy(lastKey = 'Z', pendingCount = 1), true)
 
       // f/F/t/T
       case 'f' =>
@@ -934,20 +959,7 @@ object InputHandler:
       case KeyCode.PAGE_DOWN if !ke.hasCtrl => (s.pageDown, true)
       case KeyCode.PAGE_UP if !ke.hasCtrl   => (s.pageUp, true)
       case _                                =>
-        if ke.hasCtrl && ke.isChar('d') then (s.pageDown, true)
-        else if ke.hasCtrl && ke.isChar('u') then (s.pageUp, true)
-        else if ke.hasCtrl && ke.isChar('w') then
-          (s.copy(message = "Ctrl-W"), true)
-        else if ke.hasCtrl && ke.isChar('v') then
-          (
-            s.copy(
-              mode = VisualBlock,
-              visualStart = Some(buf.cursor),
-              message = "-- VISUAL BLOCK --"
-            ),
-            true
-          )
-        else (s, true)
+        (s, true)
 
   // ── Insert ────────────────────────────────────────────────────────
 
@@ -972,7 +984,8 @@ object InputHandler:
         ),
         true
       )
-    else if ke.hasCtrl && ke.isChar('w') then
+    else if (ke.code == KeyCode.CHAR && ke.character == 23) ||
+      (ke.hasCtrl && ke.isChar('w')) then
       (s.copy(buffer = deleteWordBefore(s.buffer)), true)
     else if ke.code == KeyCode.CHAR then
       val c = ke.character
@@ -1020,7 +1033,12 @@ object InputHandler:
     val base = s.copy(mode = Normal, commandBuffer = "", message = "")
     cmd match
       case "q" | "q!" => (base.copy(message = "Quit"), true)
-      case "w"        => (base.copy(message = "Saved"), true)
+      case x if x == "w" || x.startsWith("w ") =>
+        val fname = if x.startsWith("w ") then x.drop(2).trim else ""
+        val withFname = if fname.nonEmpty then
+          base.copy(buffer = base.buffer.copy(filename = Some(fname)))
+        else base
+        (withFname.copy(message = "Saved"), true)
       case "wq"       => (base.copy(message = "Saved & quit"), true)
       case "nohl" | "nohlsearch" =>
         (base.copy(searchHighlight = false), true)
@@ -1116,10 +1134,20 @@ object InputHandler:
   // ── Visual ────────────────────────────────────────────────────────
 
   private def onVisual(ke: KeyEvent, s: EditorState): ER =
-    if ke.code == KeyCode.ESCAPE || (ke.isChar(
+    // Detect Ctrl+V by ASCII control code 22 or modifier-based check
+    val isCtrlV = (ke.code == KeyCode.CHAR && ke.character == 22) ||
+      (ke.hasCtrl && ke.isChar('v'))
+
+    // Check Ctrl+V before plain 'v' to avoid the backend that sends
+    // Ctrl+V as character 'v' with Ctrl modifier from matching 'v' first.
+    if isCtrlV then
+      val newMode = if s.mode == VisualBlock then Normal else VisualBlock
+      (s.copy(mode = newMode, message = if newMode == VisualBlock then
+        "-- VISUAL BLOCK --" else ""), true)
+    else if ke.code == KeyCode.ESCAPE || (ke.isChar(
         'v'
-      ) && s.mode == VisualChar)
-    then (s.copy(mode = Normal, visualStart = None, message = ""), true)
+      ) && s.mode == VisualChar) then
+      (s.copy(mode = Normal, visualStart = None, message = ""), true)
     else if ke.isChar('V') then
       val nm = if s.mode == VisualLine then Normal else VisualLine
       (
@@ -1130,12 +1158,16 @@ object InputHandler:
         true
       )
     else if ke.isChar('d') || ke.isChar('x') then
-      val (st, en) = visRange(s);
-      val (nb, del) = s.buffer.deleteRange(st, en)
+      val result =
+        if s.mode == VisualBlock then deleteBlock(s)
+        else
+          val (st, en) = visRange(s)
+          val (nb, del) = s.buffer.deleteRange(st, en)
+          (nb, del)
       (
         s.copy(
-          buffer = nb,
-          yankRegister = del,
+          buffer = result._1,
+          yankRegister = result._2,
           mode = Normal,
           visualStart = None,
           message = ""
@@ -1143,21 +1175,28 @@ object InputHandler:
         true
       )
     else if ke.isChar('c') then
-      val (st, en) = visRange(s);
-      val (nb, del) = s.buffer.deleteRange(st, en)
+      val result =
+        if s.mode == VisualBlock then deleteBlock(s)
+        else
+          val (st, en) = visRange(s)
+          s.buffer.deleteRange(st, en)
       enterInsert(
         s.copy(
-          buffer = nb,
-          yankRegister = del,
+          buffer = result._1,
+          yankRegister = result._2,
           mode = Normal,
           visualStart = None
         )
       )
     else if ke.isChar('y') then
-      val (st, en) = visRange(s)
+      val register =
+        if s.mode == VisualBlock then yankBlock(s)
+        else
+          val (st, en) = visRange(s)
+          s.buffer.yankRange(st, en)
       (
         s.copy(
-          yankRegister = s.buffer.yankRange(st, en),
+          yankRegister = register,
           mode = Normal,
           visualStart = None,
           message = "Yanked"
@@ -1179,10 +1218,14 @@ object InputHandler:
         true
       )
     else if ke.isChar('~') then
-      val (st, en) = visRange(s);
+      val result =
+        if s.mode == VisualBlock then toggleBlock(s)
+        else
+          val (st, en) = visRange(s);
+          toggleRange(st, en, s.buffer)
       (
         s.copy(
-          buffer = toggleRange(st, en, s.buffer),
+          buffer = result,
           mode = Normal,
           visualStart = None,
           message = ""
@@ -1240,6 +1283,25 @@ object InputHandler:
       (s.copy(pendingTextObject = true), true)
     else if ke.code == KeyCode.CHAR && ke.character == 'a' then
       (s.copy(pendingTextObject = true), true)
+    else if ke.code == KeyCode.CHAR && ke.character == op.head then
+      // Linewise operator (dd, cc, yy)
+      op match
+        case "d" =>
+          val del = s.buffer.yankLine
+          (s.copy(buffer = s.buffer.deleteLine, yankRegister = del,
+            dotRepeat = Some(DotRepeat("dd")), pendingOp = None, mode = Normal,
+            pendingCount = 1), true)
+        case "c" =>
+          val del = s.buffer.yankLine
+          enterInsert(s.copy(buffer = s.buffer.deleteLine, yankRegister = del,
+            dotRepeat = Some(DotRepeat("cc")), pendingOp = None,
+            pendingCount = 1))
+        case "y" =>
+          (s.copy(yankRegister = s.buffer.yankLine,
+            dotRepeat = Some(DotRepeat("yy")), message = "Yanked",
+            pendingOp = None, mode = Normal, pendingCount = 1), true)
+        case _ =>
+          (s.copy(pendingOp = None, mode = Normal, pendingCount = 1), true)
     else
       motionTarget(ke, s) match
         case Some(end) =>
@@ -1386,6 +1448,65 @@ object InputHandler:
       (s.copy(buffer = buf), true)
     case _ => (s, true)
 
+  // ── Visual block helpers ────────────────────────────────────────────
+
+  /** Get the column range for the current visual block. */
+  private def blockColRange(s: EditorState): (Int, Int) =
+    val vs = s.visualStart.getOrElse(s.buffer.cursor)
+    val ve = s.buffer.cursor
+    (vs.col.min(ve.col), vs.col.max(ve.col))
+
+  /** Yank just the rectangular columns from each selected row. */
+  private def yankBlock(s: EditorState): String =
+    val vs = s.visualStart.getOrElse(s.buffer.cursor)
+    val ve = s.buffer.cursor
+    val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
+    val (c1, c2) = (vs.col.min(ve.col), vs.col.max(ve.col))
+    (r1 to r2).map { r =>
+      val ln = s.buffer.lines(r).text
+      if c1 < ln.length then ln.substring(c1, c2.min(ln.length))
+      else ""
+    }.mkString("\n") + "\n"
+
+  /** Delete the rectangular block and return (newBuffer, deletedText). */
+  private def deleteBlock(s: EditorState): (TextBuffer, String) =
+    val vs = s.visualStart.getOrElse(s.buffer.cursor)
+    val ve = s.buffer.cursor
+    val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
+    val (c1, c2) = (vs.col.min(ve.col), vs.col.max(ve.col))
+    val deleted = (r1 to r2).map { r =>
+      val ln = s.buffer.lines(r).text
+      if c1 < ln.length then ln.substring(c1, c2.min(ln.length))
+      else ""
+    }.mkString("\n") + "\n"
+    val newLines = s.buffer.lines.zipWithIndex.map { (ln, r) =>
+      if r >= r1 && r <= r2 && c1 < ln.length then
+        val right = if c2 < ln.length then ln.text.substring(c2) else ""
+        TextLine(ln.text.substring(0, c1) + right)
+      else ln
+    }
+    val newBuf = s.buffer.copy(lines = newLines, modified = true,
+      cursor = CursorPos(r1, c1), undoStack = s.buffer.undoStack :+ s.buffer, redoStack = Vector.empty)
+    (newBuf, deleted)
+
+  /** Toggle case in a rectangular block. */
+  private def toggleBlock(s: EditorState): TextBuffer =
+    val vs = s.visualStart.getOrElse(s.buffer.cursor)
+    val ve = s.buffer.cursor
+    val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
+    val (c1, c2) = (vs.col.min(ve.col), vs.col.max(ve.col))
+    val newLines = s.buffer.lines.zipWithIndex.map { (ln, r) =>
+      if r >= r1 && r <= r2 then
+        val fc = c1.min(ln.length); val tc = c2.min(ln.length)
+        val toggled = ln.text.substring(fc, tc).map { ch =>
+          if ch.isLower then ch.toUpper else ch.toLower
+        }
+        TextLine(ln.text.substring(0, fc) + toggled + ln.text.substring(tc))
+      else ln
+    }
+    s.buffer.copy(lines = newLines, modified = true,
+      undoStack = s.buffer.undoStack :+ s.buffer, redoStack = Vector.empty)
+
   // ── Helpers ───────────────────────────────────────────────────────
 
   private def enterInsert(s: EditorState): ER =
@@ -1398,26 +1519,50 @@ object InputHandler:
     val t = s.yankRegister
     if t.isEmpty then s
     else if t.endsWith("\n") then
-      val c = t.stripLineEnd; val b = s.buffer.insertLineBelow
-      s.copy(buffer =
-        b.copy(
-          lines = b.lines.updated(b.row, TextLine(c)),
-          cursor = CursorPos(b.row, c.length)
-        )
-      )
+      val parts = t.stripLineEnd.split("\n", -1).toVector
+      if parts.length == 1 then
+        val b = s.buffer.insertLineBelow
+        s.copy(buffer = b.copy(
+          lines = b.lines.updated(b.row, TextLine(parts.head)),
+          cursor = CursorPos(b.row, parts.head.length)))
+      else
+        var buf = s.buffer; val col = buf.col
+        for (line, i) <- parts.zipWithIndex do
+          if i == 0 then
+            buf = buf.insertLineBelow
+            val r = buf.row
+            val left  = buf.lines(r).text.substring(0, col.min(buf.lines(r).length))
+            val right = buf.lines(r).text.substring(col.min(buf.lines(r).length))
+            buf = buf.copy(lines = buf.lines.updated(r, TextLine(left + line + right)),
+              cursor = CursorPos(r, col + line.length))
+          else
+            buf = buf.insertLineBelow
+            val r = buf.row
+            val pad = " " * (col - buf.lines(r).length.min(col))
+            buf = buf.copy(lines = buf.lines.updated(r, TextLine(pad + line)),
+              cursor = CursorPos(r, col + line.length))
+        s.copy(buffer = buf)
     else s.copy(buffer = s.buffer.insertString(t))
 
   private def execPasteBefore(s: EditorState): EditorState =
     val t = s.yankRegister
     if t.isEmpty then s
     else if t.endsWith("\n") then
-      val c = t.stripLineEnd; val b = s.buffer.insertLineAbove
-      s.copy(buffer =
-        b.copy(
-          lines = b.lines.updated(b.row, TextLine(c)),
-          cursor = CursorPos(b.row, c.length)
-        )
-      )
+      val parts = t.stripLineEnd.split("\n", -1).toVector
+      if parts.length == 1 then
+        val b = s.buffer.insertLineAbove
+        s.copy(buffer = b.copy(
+          lines = b.lines.updated(b.row, TextLine(parts.head)),
+          cursor = CursorPos(b.row, parts.head.length)))
+      else
+        var buf = s.buffer; val col = buf.col
+        for (line, i) <- parts.zipWithIndex do
+          buf = buf.insertLineAbove
+          val r = buf.row
+          val pad = " " * (col - buf.lines(r).length.min(col))
+          buf = buf.copy(lines = buf.lines.updated(r, TextLine(pad + line)),
+            cursor = CursorPos(r, col + line.length))
+        s.copy(buffer = buf)
     else s.copy(buffer = s.buffer.insertString(t))
 
   private def execDotRepeat(s: EditorState): EditorState =
@@ -1547,8 +1692,16 @@ object VimRenderer:
           val ve = state.buffer.cursor
           val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
           if i >= r1 && i <= r2 then
-            val c1 = (if i == r1 then vs.col else 0) + lnW
-            val c2 = (if i == r2 then ve.col else txt.length) + lnW
+            val (colFrom, colTo) =
+              if state.mode == VisualBlock then
+                // rectangular: same columns on every row
+                (vs.col.min(ve.col), vs.col.max(ve.col))
+              else
+                // char/line: row-specific columns
+                (if i == r1 then vs.col else 0,
+                 if i == r2 then ve.col else txt.length)
+            val c1 = colFrom + lnW
+            val c2 = colTo + lnW
             val sel = Style.EMPTY.bg(Color.MAGENTA)
             for c <- c1 until c2.min(w) do
               buf.setString(c, sr, " ", sel)
@@ -1611,10 +1764,20 @@ object VimRenderer:
 //  Application entry point
 // ═══════════════════════════════════════════════════════════════════
 
-@main def runVim(): Unit =
+@main def runVim(filename: String = ""): Unit =
   // Directly create the JLine backend to bypass ServiceLoader (needed for GraalVM native image)
   val provider = new dev.tamboui.backend.jline3.JLineBackendProvider()
   val backend = provider.create()
+
+  val initialBuf = if filename.nonEmpty then
+    val file = new java.io.File(filename)
+    if file.exists then
+      val text = scala.io.Source.fromFile(file).mkString
+      val lines = text.split("\n", -1).map(l => TextLine(l)).toVector
+      if lines.isEmpty then TextBuffer(filename = Some(filename))
+      else TextBuffer(lines = lines, filename = Some(filename))
+    else TextBuffer(filename = Some(filename))
+  else TextBuffer()
 
   val config = dev.tamboui.tui.TuiConfig
     .builder()
@@ -1626,14 +1789,14 @@ object VimRenderer:
 
   val runner = dev.tamboui.tui.TuiRunner.create(config)
   try
-    val app = new VimApp()
+    val app = new VimApp(initialBuf)
     runner.run(app, app)
   finally runner.close()
 
-final class VimApp
+final class VimApp(initialBuffer: TextBuffer)
     extends dev.tamboui.tui.EventHandler
     with dev.tamboui.tui.Renderer:
-  private var state: EditorState = EditorState()
+  private var state: EditorState = EditorState(buffer = initialBuffer)
 
   def handle(
       event: dev.tamboui.tui.event.Event,
@@ -1648,8 +1811,28 @@ final class VimApp
             termWidth = state.termWidth,
             termHeight = state.termHeight
           )
+          // Handle file operations (impure side-effects in the app shell)
+          if state.message == "Saved" || state.message == "Saved & quit" then
+            saveFile()
+          if state.message == "Saved & quit" || state.message == "Quit" then
+            runner.quit()
           redraw
       case _ => false
+
+  private def saveFile(): Unit =
+    state.buffer.filename match
+      case Some(path) =>
+        try
+          val writer = java.io.PrintWriter(java.io.File(path))
+          try
+            writer.print(state.buffer.serialize)
+          finally
+            writer.close()
+          state = state.copy(buffer = state.buffer.copy(modified = false))
+        catch case e: Exception =>
+          state = state.copy(message = s"Can't save: ${e.getMessage}")
+      case None =>
+        state = state.copy(message = "No filename")
 
   def render(frame: dev.tamboui.terminal.Frame): Unit =
     state = state
