@@ -493,6 +493,33 @@ final case class TextBuffer(
   def serialize: String = lines.map(_.text).mkString("\n") + "\n"
 
 // ═══════════════════════════════════════════════════════════════════
+//  Split pane and layout types
+// ═══════════════════════════════════════════════════════════════════
+
+/** A simple split: one pane shares the single buffer model. */
+final case class SplitPane(
+    buffer: TextBuffer = TextBuffer(),
+    scrollTop: Int = 0,
+    yankRegister: String = "",
+    searchPattern: String = "",
+    searchForward: Boolean = true
+)
+
+/** Flat list of panes arranged in a grid. */
+final case class SplitGrid(
+    panes: Vector[SplitPane],
+    active: Int,
+    rows: Int,
+    cols: Int
+):
+  def activePane: SplitPane = panes(active)
+  def withPane(f: SplitPane => SplitPane): SplitGrid =
+    copy(panes = panes.updated(active, f(activePane)))
+  def paneAt(r: Int, c: Int): Option[SplitPane] =
+    val idx = r * cols + c
+    if idx < panes.length then Some(panes(idx)) else None
+  def paneRowCol(idx: Int): (Int, Int) = (idx / cols, idx % cols)
+
 //  EditorState — immutable snapshot of the entire editor
 // ═══════════════════════════════════════════════════════════════════
 
@@ -522,7 +549,8 @@ final case class EditorState(
     termWidth: Int = 80,
     termHeight: Int = 24,
     keyMappings: Map[String, String] = Map.empty,
-    lastKey: Int = 0
+    lastKey: Int = 0,
+    splits: Option[SplitGrid] = None  // None = single pane mode
 ):
   def visibleLines: (Int, Int) =
     (scrollTop, (scrollTop + termHeight - 2).min(buffer.lineCount))
@@ -542,6 +570,133 @@ final case class EditorState(
     (scrollTop + (termHeight / 2).max(1))
       .min((buffer.lineCount - termHeight + 2).max(0))
   )
+
+  // ── Split management ────────────────────────────────────────────
+
+  /** Total number of panes across all splits. */
+  def paneCount: Int = splits.map(_.panes.length).getOrElse(1)
+
+  /** Height available per pane. */
+  def paneHeight: Int =
+    splits match
+      case Some(g) => (termHeight - 2) / g.rows
+      case None    => termHeight - 2
+
+  /** Width available per pane. */
+  def paneWidth: Int =
+    splits match
+      case Some(g) => termWidth / g.cols
+      case None    => termWidth
+
+  /** Row of the active pane on screen. */
+  def activePaneRow: Int =
+    splits match
+      case Some(g) =>
+        val (r, _) = g.paneRowCol(g.active)
+        r * paneHeight
+      case None => 0
+
+  /** Column of the active pane on screen. */
+  def activePaneCol: Int =
+    splits match
+      case Some(g) =>
+        val (_, c) = g.paneRowCol(g.active)
+        c * paneWidth
+      case None => 0
+
+  /** Set the active pane's buffer and scroll. */
+  def updateActivePane(f: SplitPane => SplitPane): EditorState =
+    splits match
+      case Some(g) => copy(splits = Some(g.withPane(f)))
+      case None    => this
+
+  /** Get SplitPane state for the active pane. */
+  def activeSplitPane: SplitPane =
+    splits match
+      case Some(g) => g.activePane
+      case None => SplitPane(buffer = buffer, scrollTop = scrollTop,
+        yankRegister = yankRegister, searchPattern = searchPattern,
+        searchForward = searchForward)
+
+  /** Sync EditorState fields from the active SplitPane. */
+  def syncFromSplits: EditorState =
+    splits match
+      case Some(g) =>
+        val p = g.activePane
+        copy(buffer = p.buffer, scrollTop = p.scrollTop,
+          yankRegister = p.yankRegister, searchPattern = p.searchPattern,
+          searchForward = p.searchForward)
+      case None => this
+
+  /** Sync SplitPane from EditorState fields and return new state. */
+  def syncToSplits: EditorState =
+    splits match
+      case Some(g) =>
+        val upd = g.withPane(_ => SplitPane(buffer = buffer, scrollTop = scrollTop,
+          yankRegister = yankRegister, searchPattern = searchPattern,
+          searchForward = searchForward))
+        copy(splits = Some(upd))
+      case None => this
+
+  /** Navigate to the pane in the given direction. Returns (newState, moved). */
+  def navigateSplit(dir: Char): EditorState =
+    splits match
+      case Some(g) =>
+        val (r, c) = g.paneRowCol(g.active)
+        val (nr, nc) = dir match
+          case 'h' => (r, (c - 1).max(0))
+          case 'l' => (r, (c + 1).min(g.cols - 1))
+          case 'k' => ((r - 1).max(0), c)
+          case 'j' => ((r + 1).min(g.rows - 1), c)
+          case _   => (r, c)
+        val newIdx = nr * g.cols + nc
+        if newIdx >= 0 && newIdx < g.panes.length && newIdx != g.active then
+          val synced = syncToSplits
+          val grid = synced.splits.get.copy(active = newIdx)
+          synced.copy(splits = Some(grid)).syncFromSplits
+        else this
+      case None => this
+
+  /** Create a horizontal split of the current pane. */
+  def splitHorizontal: EditorState =
+    val pane = SplitPane(buffer = buffer, scrollTop = scrollTop,
+      yankRegister = yankRegister, searchPattern = searchPattern,
+      searchForward = searchForward)
+    splits match
+      case Some(g) =>
+        val newRows = g.rows + 1
+        val newPanes = g.panes :+ pane
+        copy(splits = Some(SplitGrid(newPanes, g.active, newRows, g.cols)))
+      case None =>
+        copy(splits = Some(SplitGrid(Vector(pane, pane), 0, 2, 1)))
+
+  /** Create a vertical split of the current pane. */
+  def splitVertical: EditorState =
+    val pane = SplitPane(buffer = buffer, scrollTop = scrollTop,
+      yankRegister = yankRegister, searchPattern = searchPattern,
+      searchForward = searchForward)
+    splits match
+      case Some(g) =>
+        val newCols = g.cols + 1
+        val newPanes = g.panes :+ pane
+        copy(splits = Some(SplitGrid(newPanes, g.active, g.rows, newCols)))
+      case None =>
+        copy(splits = Some(SplitGrid(Vector(pane, pane), 0, 1, 2)))
+
+  /** Close the active split pane. */
+  def closeSplit: EditorState =
+    splits match
+      case Some(g) if g.panes.length <= 1 => copy(splits = None)
+      case Some(g) =>
+        val newPanes = g.panes.patch(g.active, Seq.empty, 1)
+        val newActive = g.active.min(newPanes.length - 1)
+        val total = newPanes.length
+        // Recompute rows/cols to keep roughly square
+        val newCols = math.ceil(math.sqrt(total.toDouble)).toInt
+        val newRows = (total + newCols - 1) / newCols
+        val grid = SplitGrid(newPanes, newActive, newRows.max(1), newCols.max(1))
+        copy(splits = Some(grid)).syncFromSplits
+      case None => this
 
 // ═══════════════════════════════════════════════════════════════════
 //  InputHandler — pure state transitions
@@ -580,7 +735,7 @@ object InputHandler:
           case 'v' | 22 => return (s.copy(mode = VisualBlock,
             visualStart = Some(buf2.cursor),
             message = "-- VISUAL BLOCK --"), true)
-          case 'w' | 23 => return (s.copy(message = "Ctrl-W"), true)
+          case 'w' | 23 => return (s.copy(lastKey = 'W', pendingCount = 1), true)
           case 'r' | 18 => return (s.copy(buffer = buf2.redo,
             message = "Redo"), true)
           case _ => ()
@@ -614,6 +769,23 @@ object InputHandler:
         case 'Z' => (s2.copy(message = "Saved & quit"), true)      // ZZ
         case 'Q' => (s2.copy(message = "Quit"), true)              // ZQ
         case _ => onNormalChar(c, s2)
+    else if s.lastKey == 'W' then
+      val s2 = s.copy(lastKey = 0)
+      return c match
+        case 'h' => (s2.navigateSplit('h'), true)                    // Ctrl-W h
+        case 'j' => (s2.navigateSplit('j'), true)                    // Ctrl-W j
+        case 'k' => (s2.navigateSplit('k'), true)                    // Ctrl-W k
+        case 'l' => (s2.navigateSplit('l'), true)                    // Ctrl-W l
+        case 'v' => (s2.splitVertical, true)                         // Ctrl-W v
+        case 's' => (s2.splitHorizontal, true)                       // Ctrl-W s
+        case 'q' => (s2.closeSplit, true)                            // Ctrl-W q
+        case 'w' =>                                                   // Ctrl-W w (next)
+          if s2.paneCount > 1 then
+            val nextPane = (0 until s2.paneCount - 1)
+              .foldLeft(s2)((st, _) => st.navigateSplit('j'))
+            (nextPane, true)
+          else (s2, true)
+        case _ => onNormalChar(c, s2)
 
     // counts
     if c.isDigit && (s.pendingCount > 0 || c != '0') then
@@ -638,7 +810,8 @@ object InputHandler:
             message = "-- VISUAL BLOCK --"), true)
         case 18 =>                                                     // Ctrl-R (redo)
           (s.copy(buffer = buf2.redo, message = "Redo"), true)
-        case 23 => (s.copy(message = "Ctrl-W"), true)                // Ctrl-W
+        case 23 =>                                                     // Ctrl-W (enter ctrl-w pending)
+          (s.copy(lastKey = 'W', pendingCount = 1), true)
         case _  => (s, true)
 
     c match
@@ -1051,6 +1224,12 @@ object InputHandler:
           ),
           true
         )
+      case x if x == "split" || x.startsWith("split ") =>
+        val result = base.splitHorizontal
+        (result.syncFromSplits.copy(message = "Split horizontal"), true)
+      case x if x == "vsplit" || x.startsWith("vsplit ") =>
+        val result = base.splitVertical
+        (result.syncFromSplits.copy(message = "Split vertical"), true)
       case x if x.startsWith("e ") || x.startsWith("edit ") =>
         (
           base.copy(message =
@@ -1655,77 +1834,16 @@ object VimRenderer:
     val w = frame.width()
     val h = frame.height()
     val edH = h - 2
-    val lnW = 4
     buf.clear(frame.area())
 
-    val (sL, eL) = state.visibleLines
+    state.splits match
+      case Some(grid) => renderSplits(frame, state, grid, w, edH)
+      case None =>
+        renderPane(buf, state, state.buffer, state.scrollTop,
+          state.searchPattern, 0, 0, w, edH, lnW = 4, active = true,
+          state.visualStart, state.mode, state.buffer.row)
 
-    // text lines
-    for i <- sL until eL.min(state.buffer.lineCount) do
-      val sr = i - sL; val txt = state.buffer.line(i).text
-      if sr < edH then
-        // line number
-        buf.setString(
-          0,
-          sr,
-          s"${i + 1}%${lnW - 1}s".format(" "),
-          Style.EMPTY.fg(Color.GRAY).bold()
-        )
-        // content
-        buf.setString(lnW, sr, txt.take((w - lnW).max(0)), Style.EMPTY)
-        // search highlight
-        if state.searchHighlight && state.searchPattern.nonEmpty then
-          val hl = Style.EMPTY.bg(Color.YELLOW).fg(Color.BLACK).bold()
-          var idx = txt.indexOf(state.searchPattern)
-          while idx >= 0 do
-            val sc = idx + lnW
-            if sc < w then
-              buf.setString(
-                sc,
-                sr,
-                state.searchPattern.take((w - sc).max(0)),
-                hl
-              )
-            idx = txt.indexOf(state.searchPattern, idx + 1)
-        // visual selection
-        for vs <- state.visualStart do
-          val ve = state.buffer.cursor
-          val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
-          if i >= r1 && i <= r2 then
-            val (colFrom, colTo) =
-              if state.mode == VisualBlock then
-                // rectangular: same columns on every row
-                (vs.col.min(ve.col), vs.col.max(ve.col))
-              else
-                // char/line: row-specific columns
-                (if i == r1 then vs.col else 0,
-                 if i == r2 then ve.col else txt.length)
-            val c1 = colFrom + lnW
-            val c2 = colTo + lnW
-            val sel = Style.EMPTY.bg(Color.MAGENTA)
-            for c <- c1 until c2.min(w) do
-              buf.setString(c, sr, " ", sel)
-            val vis = txt.substring(
-              (c1 - lnW).max(0).min(txt.length),
-              (c2 - lnW).min(txt.length)
-            )
-            if vis.nonEmpty then buf.setString(c1.max(0), sr, vis, sel)
-        // cursor line
-        if i == state.buffer.row then
-          val curS = state.mode match
-            case Insert => Style.EMPTY.bg(Color.GREEN)
-            case VisualChar | VisualLine | VisualBlock =>
-              Style.EMPTY.bg(Color.MAGENTA)
-            case OperatorPending => Style.EMPTY.bg(Color.YELLOW)
-            case _               => Style.EMPTY
-          val cx = state.buffer.col + lnW
-          if cx < w then
-            val ch = if state.buffer.col < txt.length then
-              txt.charAt(state.buffer.col).toString
-            else " "
-            buf.setString(cx, sr, ch, curS)
-
-    // status bar
+    // status bar (always full width)
     val stS = Style.EMPTY.bg(Color.WHITE).fg(Color.BLACK).bold()
     val mi = state.mode match
       case Normal          => " NORMAL ";
@@ -1738,7 +1856,7 @@ object VimRenderer:
       case OperatorPending => " PENDING "
     val fn = state.buffer.filename.getOrElse("[No Name]")
     val md = if state.buffer.modified then " [+]" else ""
-    val lt = s"$mi$fn$md";
+    val lt = s"$mi$fn$md"
     val rt = s"${state.buffer.row + 1},${state.buffer.col + 1}"
     buf.setString(0, h - 2, " " * w, stS)
     buf.setString(0, h - 2, lt.take(w / 2), stS)
@@ -1746,17 +1864,108 @@ object VimRenderer:
 
     // command line
     if state.mode == Command || state.mode == Search then
-      buf.setString(
-        0,
-        h - 1,
-        state.message.take(w),
-        Style.EMPTY.bg(Color.YELLOW).fg(Color.BLACK)
-      )
+      buf.setString(0, h - 1, state.message.take(w),
+        Style.EMPTY.bg(Color.YELLOW).fg(Color.BLACK))
     else buf.setString(0, h - 1, state.message.take(w), Style.EMPTY)
 
-    // cursor
-    val cr = state.buffer.row - state.scrollTop;
-    val cc = state.buffer.col + lnW
+    // cursor in single-pane mode
+    if state.splits.isEmpty then
+      val cr = state.buffer.row - state.scrollTop
+      val cc = state.buffer.col + 4
+      if cr >= 0 && cr < edH then
+        frame.setCursorPosition(cc.min(w - 1), cr)
+
+  /** Render one pane. */
+  private def renderPane(
+    buf: Buffer, st: EditorState,
+    buffer: TextBuffer, scrollTop: Int,
+    searchPattern: String,
+    offX: Int, offY: Int, pw: Int, ph: Int,
+    lnW: Int, active: Boolean,
+    visualStart: Option[CursorPos], mode: Mode, cursorRow: Int
+  ): Unit =
+    val (sL, eL) = (scrollTop, (scrollTop + ph).min(buffer.lineCount))
+    for i <- sL until eL.min(buffer.lineCount) do
+      val sr = i - sL + offY; val txt = buffer.line(i).text
+      if sr - offY < ph then
+        buf.setString(offX, sr,
+          s"${i + 1}%${lnW - 1}s".format(" "),
+          Style.EMPTY.fg(Color.GRAY).bold())
+        val visible = txt.take((pw - lnW).max(0))
+        buf.setString(offX + lnW, sr, visible, Style.EMPTY)
+        // search highlight
+        if searchPattern.nonEmpty then
+          val hl = Style.EMPTY.bg(Color.YELLOW).fg(Color.BLACK).bold()
+          var idx = txt.indexOf(searchPattern)
+          while idx >= 0 do
+            val sc = offX + idx + lnW
+            if sc < offX + pw then
+              buf.setString(sc, sr,
+                searchPattern.take((pw + offX - sc).max(0)), hl)
+            idx = txt.indexOf(searchPattern, idx + 1)
+        // visual selection
+        for vs <- visualStart do
+          val ve = buffer.cursor
+          val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
+          if i >= r1 && i <= r2 then
+            val (colFrom, colTo) =
+              if mode == VisualBlock then
+                (vs.col.min(ve.col), vs.col.max(ve.col))
+              else
+                (if i == r1 then vs.col else 0,
+                 if i == r2 then ve.col else txt.length)
+            val c1 = offX + colFrom + lnW
+            val c2 = offX + colTo + lnW
+            val sel = Style.EMPTY.bg(Color.MAGENTA)
+            for c <- c1 until c2.min(offX + pw) do
+              buf.setString(c, sr, " ", sel)
+            val vis = txt.substring(colFrom.max(0).min(txt.length),
+              colTo.min(txt.length))
+            if vis.nonEmpty then buf.setString(c1.max(0), sr, vis, sel)
+        // cursor
+        if i == cursorRow && active then
+          val curS = mode match
+            case Insert => Style.EMPTY.bg(Color.GREEN)
+            case VisualChar | VisualLine | VisualBlock =>
+              Style.EMPTY.bg(Color.MAGENTA)
+            case OperatorPending => Style.EMPTY.bg(Color.YELLOW)
+            case _ => Style.EMPTY
+          val cx = offX + buffer.col + lnW
+          if cx < offX + pw then
+            val ch = if buffer.col < txt.length then
+              txt.charAt(buffer.col).toString else " "
+            buf.setString(cx, sr, ch, curS)
+
+  /** Render all split panes as a grid. */
+  private def renderSplits(
+    frame: Frame, state: EditorState, grid: SplitGrid, w: Int, edH: Int
+  ): Unit =
+    val buf = frame.buffer()
+    val paneW = w / grid.cols
+    val paneH = edH / grid.rows
+    val lnW = 2
+
+    for idx <- grid.panes.indices do
+      val (r, c) = grid.paneRowCol(idx)
+      val offX = c * paneW
+      val offY = r * paneH
+      val pane = grid.panes(idx)
+      renderPane(buf, state, pane.buffer, pane.scrollTop,
+        pane.searchPattern, offX, offY, paneW, paneH, lnW,
+        active = idx == grid.active, None, state.mode, pane.buffer.row)
+      // Draw separators
+      if c < grid.cols - 1 then
+        for y <- offY until (offY + paneH).min(edH) do
+          buf.setString(offX + paneW - 1, y, "│", Style.EMPTY.fg(Color.GRAY))
+      if r < grid.rows - 1 then
+        for x <- offX until (offX + paneW).min(w) do
+          buf.setString(x, offY + paneH - 1, "─", Style.EMPTY.fg(Color.GRAY))
+
+    // Cursor in active pane
+    val (ar, ac) = grid.paneRowCol(grid.active)
+    val ap = grid.panes(grid.active)
+    val cr = ap.buffer.row - ap.scrollTop + ar * paneH
+    val cc = ap.buffer.col + lnW + ac * paneW
     if cr >= 0 && cr < edH then
       frame.setCursorPosition(cc.min(w - 1), cr)
 
@@ -1806,11 +2015,13 @@ final class VimApp(initialBuffer: TextBuffer)
       case ke: dev.tamboui.tui.event.KeyEvent =>
         if ke.isQuit then { runner.quit(); false }
         else
-          val (ns, redraw) = InputHandler.handle(ke, state)
+          // Sync from split panes, handle event, then sync back
+          val synced = state.syncFromSplits
+          val (ns, redraw) = InputHandler.handle(ke, synced)
           state = ns.copy(
             termWidth = state.termWidth,
             termHeight = state.termHeight
-          )
+          ).syncToSplits
           // Handle file operations (impure side-effects in the app shell)
           if state.message == "Saved" || state.message == "Saved & quit" then
             saveFile()
