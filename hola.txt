@@ -1,5 +1,9 @@
-import os
-import sys
+Vjport os
+imrt sys
+
+def test(x):
+    test in 
+
 
 de test()
 
@@ -8,12 +12,32 @@ po
 po
 
 def
+hi  
 in another was solved in way
 
-
+asdf
 impor
 impor
 
 de te
 
+imrt 
 
+def t
+
+
+
+imrt 
+
+def t
+
+
+
+
+sdfs
+
+
+asdfasdfads
+
+
+asfsafsdfasf

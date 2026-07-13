@@ -552,23 +552,29 @@ final case class EditorState(
     lastKey: Int = 0,
     splits: Option[SplitGrid] = None  // None = single pane mode
 ):
+  /** Number of visible text lines in the active pane. */
+  def viewHeight: Int =
+    splits match
+      case Some(g) => (termHeight - 2) / g.rows
+      case None    => termHeight - 2
+
   def visibleLines: (Int, Int) =
-    (scrollTop, (scrollTop + termHeight - 2).min(buffer.lineCount))
+    (scrollTop, (scrollTop + viewHeight).min(buffer.lineCount))
 
   def ensureCursorVisible: EditorState =
     val (s, e) = visibleLines
     if buffer.row < s then copy(scrollTop = buffer.row)
     else if buffer.row >= e then
-      copy(scrollTop = buffer.row - termHeight + 3)
+      copy(scrollTop = buffer.row - viewHeight + 1)
     else this
 
   def centerCursor: EditorState =
-    copy(scrollTop = (buffer.row - termHeight / 2 + 1).max(0))
+    copy(scrollTop = (buffer.row - viewHeight / 2).max(0))
   def pageUp: EditorState =
-    copy(scrollTop = (scrollTop - (termHeight / 2).max(1)).max(0))
+    copy(scrollTop = (scrollTop - viewHeight / 2).max(0))
   def pageDown: EditorState = copy(scrollTop =
-    (scrollTop + (termHeight / 2).max(1))
-      .min((buffer.lineCount - termHeight + 2).max(0))
+    (scrollTop + viewHeight / 2)
+      .min((buffer.lineCount - viewHeight).max(0))
   )
 
   // ── Split management ────────────────────────────────────────────
@@ -651,8 +657,8 @@ final case class EditorState(
           case _   => (r, c)
         val newIdx = nr * g.cols + nc
         if newIdx >= 0 && newIdx < g.panes.length && newIdx != g.active then
-          val synced = syncToSplits
-          val grid = synced.splits.get.copy(active = newIdx)
+          val synced = syncToSplits.copy(mode = Mode.Normal, visualStart = None)
+          val grid    = synced.splits.get.copy(active = newIdx)
           synced.copy(splits = Some(grid)).syncFromSplits
         else this
       case None => this
@@ -686,16 +692,15 @@ final case class EditorState(
   /** Close the active split pane. */
   def closeSplit: EditorState =
     splits match
-      case Some(g) if g.panes.length <= 1 => copy(splits = None)
+      case Some(g) if g.panes.length <= 1 => copy(splits = None, mode = Mode.Normal, visualStart = None)
       case Some(g) =>
         val newPanes = g.panes.patch(g.active, Seq.empty, 1)
         val newActive = g.active.min(newPanes.length - 1)
         val total = newPanes.length
-        // Recompute rows/cols to keep roughly square
         val newCols = math.ceil(math.sqrt(total.toDouble)).toInt
         val newRows = (total + newCols - 1) / newCols
         val grid = SplitGrid(newPanes, newActive, newRows.max(1), newCols.max(1))
-        copy(splits = Some(grid)).syncFromSplits
+        copy(splits = Some(grid), mode = Mode.Normal, visualStart = None).syncFromSplits
       case None => this
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1952,7 +1957,8 @@ object VimRenderer:
       val pane = grid.panes(idx)
       renderPane(buf, state, pane.buffer, pane.scrollTop,
         pane.searchPattern, offX, offY, paneW, paneH, lnW,
-        active = idx == grid.active, None, state.mode, pane.buffer.row)
+        active = idx == grid.active, state.visualStart, state.mode,
+        pane.buffer.row)
       // Draw separators
       if c < grid.cols - 1 then
         for y <- offY until (offY + paneH).min(edH) do
