@@ -1436,7 +1436,7 @@ object InputHandler:
 
   private def visRange(s: EditorState): (CursorPos, CursorPos) =
     val start = s.visualStart.getOrElse(s.buffer.cursor)
-    val end = s.buffer.cursor
+    val end   = s.buffer.cursor
     if s.mode == VisualLine then
       (
         CursorPos(start.row.min(end.row), 0),
@@ -1445,7 +1445,15 @@ object InputHandler:
           s.buffer.lines(start.row.max(end.row)).length
         )
       )
-    else (start, end)
+    else if s.mode == VisualBlock then
+      val cFrom = start.col.min(end.col)
+      val cTo   = start.col.max(end.col) + 1  // inclusive of cursor column
+      (CursorPos(start.row.min(end.row), cFrom),
+       CursorPos(start.row.max(end.row), cTo))
+    else
+      // Char visual: include the cursor column in the range
+      if start <= end then (start, CursorPos(end.row, end.col + 1))
+      else (CursorPos(end.row, end.col + 1), start)
 
   private def toggleRange(
       from: CursorPos,
@@ -1923,23 +1931,24 @@ object VimRenderer:
               buf.setString(sc, sr,
                 searchPattern.take((pw + offX - sc).max(0)), hl)
             idx = txt.indexOf(searchPattern, idx + 1)
-        // visual selection
+        // visual selection (inclusive of cursor position)
         for vs <- visualStart do
           val ve = buffer.cursor
           val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
           if i >= r1 && i <= r2 then
             val (colFrom, colTo) =
               if mode == VisualBlock then
-                (vs.col.min(ve.col), vs.col.max(ve.col))
+                (vs.col.min(ve.col), vs.col.max(ve.col) + 1)
               else
                 (if i == r1 then vs.col else 0,
-                 if i == r2 then ve.col else txt.length)
+                 if i == r2 then ve.col + 1 else txt.length)
             val c1 = offX + colFrom + lnW
             val c2 = offX + colTo + lnW
             val sel = Style.EMPTY.bg(Color.MAGENTA)
             for c <- c1 until c2.min(offX + pw) do
               buf.setString(c, sr, " ", sel)
-            val vis = txt.substring(colFrom.max(0).min(txt.length),
+            val vis = txt.substring(
+              colFrom.max(0).min(txt.length),
               colTo.min(txt.length))
             if vis.nonEmpty then buf.setString(c1.max(0), sr, vis, sel)
         // cursor
@@ -2070,3 +2079,14 @@ final class VimApp(initialBuffer: TextBuffer)
       .ensureCursorVisible
       .syncToSplits
     VimRenderer.render(frame, state)
+    // Set cursor shape via ANSI escape codes
+    val cursorShape = state.mode match
+      case Mode.Insert => "\u001b[6 q"   // bar cursor
+      case Mode.VisualChar | Mode.VisualLine | Mode.VisualBlock =>
+        "\u001b[2 q"   // block cursor
+      case _ => "\u001b[2 q"              // block cursor for normal/pending
+    // Write directly to stdout (terminal is in raw mode)
+    try
+      System.out.write(cursorShape.getBytes())
+      System.out.flush()
+    catch case _: Exception => ()
