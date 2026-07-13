@@ -550,8 +550,12 @@ final case class EditorState(
     termHeight: Int = 24,
     keyMappings: Map[String, String] = Map.empty,
     lastKey: Int = 0,
-    splits: Option[SplitGrid] = None  // None = single pane mode
+    splits: Option[SplitGrid] = None,  // None = single pane mode
+    number: Boolean = false           // show line numbers
 ):
+  /** Line number width: 4 when enabled, 0 when disabled. */
+  def lnW: Int = if number then 4 else 0
+
   /** Number of visible text lines in the active pane. */
   def viewHeight: Int =
     splits match
@@ -1220,6 +1224,8 @@ object InputHandler:
       case "wq"       => (base.copy(message = "Saved & quit"), true)
       case "nohl" | "nohlsearch" =>
         (base.copy(searchHighlight = false), true)
+      case "set number"       => (base.copy(number = true), true)
+      case "set nonumber"     => (base.copy(number = false), true)
       case "set hlsearch"   => (base.copy(hlsearch = true), true)
       case "set nohlsearch" => (base.copy(hlsearch = false), true)
       case "help" | "h"     =>
@@ -1845,7 +1851,7 @@ object VimRenderer:
       case Some(grid) => renderSplits(frame, state, grid, w, edH)
       case None =>
         renderPane(buf, state, state.buffer, state.scrollTop,
-          state.searchPattern, 0, 0, w, edH, lnW = 4, active = true,
+          state.searchPattern, 0, 0, w, edH, lnW = state.lnW, active = true,
           state.visualStart, state.mode, state.buffer.row)
 
     // status bar (always full width)
@@ -1876,7 +1882,7 @@ object VimRenderer:
     // cursor in single-pane mode
     if state.splits.isEmpty then
       val cr = state.buffer.row - state.scrollTop
-      val cc = state.buffer.col + 4
+      val cc = state.buffer.col + state.lnW
       if cr >= 0 && cr < edH then
         frame.setCursorPosition(cc.min(w - 1), cr)
 
@@ -1948,7 +1954,7 @@ object VimRenderer:
     val buf = frame.buffer()
     val paneW = w / grid.cols
     val paneH = edH / grid.rows
-    val lnW = 2
+    val lnW = state.lnW.max(1)  // always at least 1 in split mode for visual separation
 
     for idx <- grid.panes.indices do
       val (r, c) = grid.paneRowCol(idx)
@@ -2055,4 +2061,5 @@ final class VimApp(initialBuffer: TextBuffer)
     state = state
       .copy(termWidth = frame.width(), termHeight = frame.height())
       .ensureCursorVisible
+      .syncToSplits
     VimRenderer.render(frame, state)
