@@ -1,43 +1,18 @@
-Vjport os
-imrt sys
-
-def test(x):
-    test in 
+import os
+import sys
 
 
-de test()
+def test():
+    print('asdf')
 
-
-po
-po
-
-def
-hi  
-in another was solved in way
-
-asdf
-impor
-impor
-
-de te
-
-imrt 
-
-def t
-
-
-
-imrt 
-
-def t
+def test2():
+    print('asfasdfasdf')
 
 
 
 
-sdfs
+import
+def import
 
-
-asdfasdfads
-
-
-asfsafsdfasf
+hila
+hsdf  oladef 

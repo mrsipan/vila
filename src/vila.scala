@@ -642,10 +642,22 @@ final case class EditorState(
   def syncToSplits: EditorState =
     splits match
       case Some(g) =>
-        val upd = g.withPane(_ => SplitPane(buffer = buffer, scrollTop = scrollTop,
-          yankRegister = yankRegister, searchPattern = searchPattern,
-          searchForward = searchForward))
-        copy(splits = Some(upd))
+        val activeBuf = buffer
+        val activeFname = buffer.filename
+        val upd = g.withPane { _ =>
+          SplitPane(buffer = activeBuf, scrollTop = scrollTop,
+            yankRegister = yankRegister, searchPattern = searchPattern,
+            searchForward = searchForward)
+        }
+        // Propagate the active buffer to all other panes that share the
+        // same filename (or have no filename = same unnamed buffer).
+        val propagated = upd.copy(panes = upd.panes.zipWithIndex.map { (p, i) =>
+          if i != upd.active && (p.buffer.filename.isEmpty ||
+            p.buffer.filename == activeFname) then
+            p.copy(buffer = activeBuf)
+          else p
+        })
+        copy(splits = Some(propagated))
       case None => this
 
   /** Navigate to the pane in the given direction. Returns (newState, moved). */
@@ -1664,23 +1676,25 @@ object InputHandler:
     (vs.col.min(ve.col), vs.col.max(ve.col))
 
   /** Yank just the rectangular columns from each selected row. */
-  private def yankBlock(s: EditorState): String =
+  /** Inclusive column range for block operations. */
+  private def blockRange(s: EditorState): (Int, Int, Int, Int) =
     val vs = s.visualStart.getOrElse(s.buffer.cursor)
     val ve = s.buffer.cursor
     val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
-    val (c1, c2) = (vs.col.min(ve.col), vs.col.max(ve.col))
+    val c1 = vs.col.min(ve.col)
+    val c2 = vs.col.max(ve.col) + 1  // inclusive of cursor column
+    (r1, r2, c1, c2)
+
+  private def yankBlock(s: EditorState): String =
+    val (r1, r2, c1, c2) = blockRange(s)
     (r1 to r2).map { r =>
       val ln = s.buffer.lines(r).text
       if c1 < ln.length then ln.substring(c1, c2.min(ln.length))
       else ""
     }.mkString("\n") + "\n"
 
-  /** Delete the rectangular block and return (newBuffer, deletedText). */
   private def deleteBlock(s: EditorState): (TextBuffer, String) =
-    val vs = s.visualStart.getOrElse(s.buffer.cursor)
-    val ve = s.buffer.cursor
-    val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
-    val (c1, c2) = (vs.col.min(ve.col), vs.col.max(ve.col))
+    val (r1, r2, c1, c2) = blockRange(s)
     val deleted = (r1 to r2).map { r =>
       val ln = s.buffer.lines(r).text
       if c1 < ln.length then ln.substring(c1, c2.min(ln.length))
@@ -1692,16 +1706,12 @@ object InputHandler:
         TextLine(ln.text.substring(0, c1) + right)
       else ln
     }
-    val newBuf = s.buffer.copy(lines = newLines, modified = true,
-      cursor = CursorPos(r1, c1), undoStack = s.buffer.undoStack :+ s.buffer, redoStack = Vector.empty)
-    (newBuf, deleted)
+    (s.buffer.copy(lines = newLines, modified = true,
+      cursor = CursorPos(r1, c1),
+      undoStack = s.buffer.undoStack :+ s.buffer, redoStack = Vector.empty), deleted)
 
-  /** Toggle case in a rectangular block. */
   private def toggleBlock(s: EditorState): TextBuffer =
-    val vs = s.visualStart.getOrElse(s.buffer.cursor)
-    val ve = s.buffer.cursor
-    val r1 = vs.row.min(ve.row); val r2 = vs.row.max(ve.row)
-    val (c1, c2) = (vs.col.min(ve.col), vs.col.max(ve.col))
+    val (r1, r2, c1, c2) = blockRange(s)
     val newLines = s.buffer.lines.zipWithIndex.map { (ln, r) =>
       if r >= r1 && r <= r2 then
         val fc = c1.min(ln.length); val tc = c2.min(ln.length)
@@ -1916,9 +1926,10 @@ object VimRenderer:
     for i <- sL until eL.min(buffer.lineCount) do
       val sr = i - sL + offY; val txt = buffer.line(i).text
       if sr - offY < ph then
-        buf.setString(offX, sr,
-          s"${i + 1}%${lnW - 1}s".format(" "),
-          Style.EMPTY.fg(Color.GRAY).bold())
+        if lnW > 0 then
+          val lineStr = "%" + lnW + "d" format (i + 1)
+          buf.setString(offX, sr, lineStr take lnW,
+            Style.EMPTY.fg(Color.GRAY).bold())
         val visible = txt.take((pw - lnW).max(0))
         buf.setString(offX + lnW, sr, visible, Style.EMPTY)
         // search highlight
@@ -1972,7 +1983,7 @@ object VimRenderer:
     val buf = frame.buffer()
     val paneW = w / grid.cols
     val paneH = edH / grid.rows
-    val lnW = state.lnW.max(1)  // always at least 1 in split mode for visual separation
+    val lnW = state.lnW  // 0 when numbers off, 4 when on
 
     for idx <- grid.panes.indices do
       val (r, c) = grid.paneRowCol(idx)
