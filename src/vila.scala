@@ -739,6 +739,8 @@ object InputHandler:
       if ke.hasCtrl then
         val buf2 = s.buffer
         ke.character match
+          case 'c' | 3  => return (s.copy(pendingOp = None, pendingCount = 1,
+            lastKey = 0, mode = Mode.Normal, visualStart = None), true)
           case 'd' | 4  => return (s.pageDown, true)
           case 'u' | 21 => return (s.pageUp, true)
           case 'v' | 22 => return (s.copy(mode = VisualBlock,
@@ -812,6 +814,8 @@ object InputHandler:
     if ctrlCode >= 1 && ctrlCode <= 26 then
       val buf2 = s.buffer
       return ctrlCode match
+        case 3  => (s.copy(pendingOp = None, pendingCount = 1,
+          lastKey = 0, mode = Mode.Normal, visualStart = None), true) // Ctrl-C
         case 4  => (s.pageDown, true)                                 // Ctrl-D
         case 21 => (s.pageUp, true)                                   // Ctrl-U
         case 22 =>                                                    // Ctrl-V (visual block)
@@ -1146,7 +1150,8 @@ object InputHandler:
   // ── Insert ────────────────────────────────────────────────────────
 
   private def onInsert(ke: KeyEvent, s: EditorState): ER =
-    if ke.code == KeyCode.ESCAPE then
+    if ke.code == KeyCode.ESCAPE || (ke.code == KeyCode.CHAR &&
+      (ke.character == 3 || (ke.hasCtrl && ke.isChar('c')))) then
       (
         s.copy(
           mode = Normal,
@@ -1195,7 +1200,8 @@ object InputHandler:
   // ── Command ───────────────────────────────────────────────────────
 
   private def onCommand(ke: KeyEvent, s: EditorState): ER =
-    if ke.code == KeyCode.ESCAPE then
+    if ke.code == KeyCode.ESCAPE || (ke.code == KeyCode.CHAR &&
+      (ke.character == 3 || (ke.hasCtrl && ke.isChar('c')))) then
       (s.copy(mode = Normal, commandBuffer = "", message = ""), true)
     else if ke.code == KeyCode.ENTER || ke.isChar('\r') then
       execCommand(s.commandBuffer.trim, s)
@@ -1265,7 +1271,8 @@ object InputHandler:
   // ── Search ────────────────────────────────────────────────────────
 
   private def onSearch(ke: KeyEvent, s: EditorState): ER =
-    if ke.code == KeyCode.ESCAPE then
+    if ke.code == KeyCode.ESCAPE || (ke.code == KeyCode.CHAR &&
+      (ke.character == 3 || (ke.hasCtrl && ke.isChar('c')))) then
       (s.copy(mode = Normal, message = ""), true)
     else if ke.code == KeyCode.ENTER || ke.isChar('\r') then
       val p = s.searchPattern
@@ -1334,9 +1341,10 @@ object InputHandler:
       val newMode = if s.mode == VisualBlock then Normal else VisualBlock
       (s.copy(mode = newMode, message = if newMode == VisualBlock then
         "-- VISUAL BLOCK --" else ""), true)
-    else if ke.code == KeyCode.ESCAPE || (ke.isChar(
-        'v'
-      ) && s.mode == VisualChar) then
+    else if ke.code == KeyCode.ESCAPE ||
+      (ke.code == KeyCode.CHAR && ke.character == 3) ||
+      (ke.hasCtrl && ke.isChar('c')) ||
+      (ke.isChar('v') && s.mode == VisualChar) then
       (s.copy(mode = Normal, visualStart = None, message = ""), true)
     else if ke.isChar('V') then
       val nm = if s.mode == VisualLine then Normal else VisualLine
@@ -1462,7 +1470,8 @@ object InputHandler:
   // ── Operator Pending ──────────────────────────────────────────────
 
   private def onOpPending(ke: KeyEvent, s: EditorState): ER =
-    if ke.code == KeyCode.ESCAPE then
+    if ke.code == KeyCode.ESCAPE || (ke.code == KeyCode.CHAR &&
+      (ke.character == 3 || (ke.hasCtrl && ke.isChar('c')))) then
       (s.copy(mode = Normal, pendingOp = None, pendingCount = 1), true)
     else if s.pendingTextObject then onTextObject(ke, s)
     else onMotionWithOp(ke, s)
@@ -2025,14 +2034,12 @@ final class VimApp(initialBuffer: TextBuffer)
   ): Boolean =
     event match
       case ke: dev.tamboui.tui.event.KeyEvent =>
-        if ke.isQuit then { runner.quit(); false }
-        else
-          // Sync from split panes, handle event, then sync back
-          val synced = state.syncFromSplits
-          val (ns, redraw) = InputHandler.handle(ke, synced)
-          state = ns.copy(
-            termWidth = state.termWidth,
-            termHeight = state.termHeight
+        // Sync from split panes, handle event, then sync back
+        val synced = state.syncFromSplits
+        val (ns, redraw) = InputHandler.handle(ke, synced)
+        state = ns.copy(
+          termWidth = state.termWidth,
+          termHeight = state.termHeight
           ).syncToSplits
           // Handle file operations (impure side-effects in the app shell)
           if state.message == "Saved" || state.message == "Saved & quit" then
